@@ -5,7 +5,6 @@ import * as path from 'path';
 import { mergeRight } from 'ramda';
 import * as Serverless from 'serverless';
 import * as Plugin from 'serverless/classes/Plugin';
-import * as chokidar from 'chokidar';
 
 import { extractFileNames } from './helper';
 import { packExternalModules } from './pack-externals';
@@ -26,7 +25,7 @@ export interface Configuration extends BuildOptions {
   packager: 'npm' | 'yarn';
   packagePath: string;
   exclude: string[];
-  watch: WatchConfiguration;
+  watch: boolean;
 }
 
 const DEFAULT_BUILD_OPTIONS: Partial<Configuration> = {
@@ -35,10 +34,7 @@ const DEFAULT_BUILD_OPTIONS: Partial<Configuration> = {
   external: [],
   exclude: ['aws-sdk'],
   packager: 'npm',
-  watch: {
-    pattern: './**/*.(js|ts)',
-    ignore: [BUILD_FOLDER, 'dist', 'node_modules', SERVERLESS_FOLDER],
-  },
+  watch: false,
 };
 
 export class EsbuildPlugin implements Plugin {
@@ -70,13 +66,11 @@ export class EsbuildPlugin implements Plugin {
         await this.bundle();
         await this.packExternalModules();
         await this.copyExtras();
-        this.watch();
       },
       'before:offline:start:init': async () => {
         await this.bundle();
         await this.packExternalModules();
         await this.copyExtras();
-        this.watch();
       },
       'before:package:createDeploymentArtifacts': async () => {
         await this.bundle();
@@ -125,20 +119,6 @@ export class EsbuildPlugin implements Plugin {
     );
   }
 
-  async watch(): Promise<void> {
-    const options = {
-      ignored: this.buildOptions.watch.ignore,
-      awaitWriteFinish: true,
-      ignoreInitial: true,
-    };
-
-    chokidar
-      .watch(this.buildOptions.watch.pattern, options)
-      .on('all', () =>
-        this.bundle(true).then(() => this.serverless.cli.log('Watching files for changes...'))
-      );
-  }
-
   prepare() {
     // exclude serverless-esbuild
     for (const fnName in this.functions) {
@@ -181,7 +161,6 @@ export class EsbuildPlugin implements Plugin {
         delete config['exclude'];
         delete config['packager'];
         delete config['packagePath'];
-        delete config['watch'];
 
         return build(config);
       })
