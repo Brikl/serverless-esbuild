@@ -1,8 +1,11 @@
+import { bestzip } from 'bestzip';
 import * as archiver from 'archiver';
 import * as childProcess from 'child_process';
 import * as fs from 'fs-extra';
 import * as path from 'path';
+import * as os from 'os';
 import { join } from 'ramda';
+import { IFiles } from './types';
 
 export class SpawnError extends Error {
   constructor(message: string, public stdout: string, public stderr: string) {
@@ -35,16 +38,16 @@ export function spawnProcess(
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     // Listen to stream events
-    child.stdout.on('data', data => {
+    child.stdout.on('data', (data) => {
       stdout += data;
     });
-    child.stderr.on('data', data => {
+    child.stderr.on('data', (data) => {
       stderr += data;
     });
-    child.on('error', err => {
+    child.on('error', (err) => {
       reject(err);
     });
-    child.on('close', exitCode => {
+    child.on('close', (exitCode) => {
       if (exitCode !== 0) {
         reject(
           new SpawnError(
@@ -63,11 +66,21 @@ export function spawnProcess(
 /**
  * Find a file by walking up parent directories
  */
-export function findUp(name: string, directory: string = process.cwd()): string | undefined {
+export function findUp(
+  names: string | string[],
+  directory: string = process.cwd()
+): string | undefined {
   const absoluteDirectory = path.resolve(directory);
 
-  if (fs.existsSync(path.join(directory, name))) {
-    return directory;
+  if (typeof names === 'string') {
+    names = [names];
+  }
+
+  /* For vs. .forEach so it can exit when we get a hit. */
+  for (const name of names) {
+    if (fs.existsSync(path.join(directory, name))) {
+      return directory;
+    }
   }
 
   const { root } = path.parse(absoluteDirectory);
@@ -75,14 +88,14 @@ export function findUp(name: string, directory: string = process.cwd()): string 
     return undefined;
   }
 
-  return findUp(name, path.dirname(absoluteDirectory));
+  return findUp(names, path.dirname(absoluteDirectory));
 }
 
 /**
  * Forwards `rootDir` or finds project root folder.
  */
 export function findProjectRoot(rootDir?: string): string | undefined {
-  return rootDir ?? findUp('yarn.lock') ?? findUp('package-lock.json') ?? findUp('package.json');
+  return rootDir ?? findUp(['yarn.lock', 'package-lock.json']);
 }
 
 export const humanSize = (size: number) => {
@@ -91,34 +104,68 @@ export const humanSize = (size: number) => {
   return `${sanitized} ${['B', 'KB', 'MB', 'GB', 'TB'][i]}`;
 };
 
-export const zip = (zipPath: string, filesPathList: { rootPath: string; localPath: string }[]) => {
+export const zip = async (
+  zipPath: string,
+  filesPathList: IFiles,
+  useNativeZip = false
+): Promise<void> => {
+  // create a temporary directory to hold the final zip structure
+  const tempDirName = `${path.basename(zipPath).slice(0, -4)}-${Date.now().toString()}`;
+  const tempDirPath = path.join(os.tmpdir(), tempDirName);
+  fs.mkdirpSync(tempDirPath);
+
+  // copy all required files from origin path to (sometimes modified) target path
+  await Promise.all(
+    filesPathList.map((file) => fs.copy(file.rootPath, path.join(tempDirPath, file.localPath)))
+  );
+
+  // prepare zip folder
   fs.mkdirpSync(path.dirname(zipPath));
 
-  const zip = archiver.create('zip');
-  const output = fs.createWriteStream(zipPath);
+  if (useNativeZip) {
+    // zip the temporary directory
+    await bestzip({
+      source: '*',
+      destination: zipPath,
+      cwd: tempDirPath,
+    });
 
-  // write zip
-  output.on('open', () => {
-    zip.pipe(output);
+    // delete the temporary folder
+    fs.rmdirSync(tempDirPath, { recursive: true });
+  } else {
+    const zip = archiver.create('zip');
+    const output = fs.createWriteStream(zipPath);
 
-    filesPathList.forEach(file => {
-      const stats = fs.statSync(file.rootPath);
-      if (stats.isDirectory()) return;
+    // write zip
+    output.on('open', () => {
+      zip.pipe(output);
 
-      zip.append(fs.readFileSync(file.rootPath), {
-        name: file.localPath,
-        mode: stats.mode,
-        date: new Date(0), // necessary to get the same hash when zipping the same content
+      filesPathList.forEach((file) => {
+        const stats = fs.statSync(file.rootPath);
+        if (stats.isDirectory()) return;
+
+        zip.append(fs.readFileSync(file.rootPath), {
+          name: file.localPath,
+          mode: stats.mode,
+          date: new Date(0), // necessary to get the same hash when zipping the same content
+        });
       });
+
+      zip.finalize();
     });
 
-    zip.finalize();
-  });
+    return new Promise((resolve, reject) => {
+      output.on('close', () => {
+        // delete the temporary folder
+        fs.rmdirSync(tempDirPath, { recursive: true });
 
-  return new Promise((resolve, reject) => {
-    output.on('close', () => {
-      resolve(zipPath);
+        resolve();
+      });
+      zip.on('error', (err) => reject(err));
     });
-    zip.on('error', err => reject(err));
-  });
+  }
 };
+
+export function trimExtension(entry: string) {
+  return entry.slice(0, -path.extname(entry).length);
+}

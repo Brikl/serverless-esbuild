@@ -1,14 +1,26 @@
 import * as fs from 'fs-extra';
-import * as glob from 'glob';
+import * as globby from 'globby';
 import * as path from 'path';
-import { intersection, isEmpty, path as get, without } from 'ramda';
+import {
+  intersection,
+  isEmpty,
+  lensProp,
+  map,
+  over,
+  pipe,
+  reject,
+  replace,
+  test,
+  without,
+} from 'ramda';
 import * as semver from 'semver';
-import { EsbuildPlugin, SERVERLESS_FOLDER } from '.';
+import { EsbuildServerlessPlugin, SERVERLESS_FOLDER } from '.';
 import { doSharePath, flatDep, getDepsFromBundle } from './helper';
 import * as Packagers from './packagers';
-import { humanSize, zip } from './utils';
+import { IFiles } from './types';
+import { humanSize, zip, trimExtension } from './utils';
 
-function setFunctionArtifactPath(this: EsbuildPlugin, func, artifactPath) {
+function setFunctionArtifactPath(this: EsbuildServerlessPlugin, func, artifactPath) {
   const version = this.serverless.getVersion();
   // Serverless changed the artifact path location in version 1.18
   if (semver.lt(version, '1.18.0')) {
@@ -24,26 +36,32 @@ function setFunctionArtifactPath(this: EsbuildPlugin, func, artifactPath) {
   }
 }
 
-const excludedFilesDefault = ['package-lock.json', 'yarn.lock', 'package.json'];
+const excludedFilesDefault = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'package.json'];
 
-export async function pack(this: EsbuildPlugin) {
+export async function pack(this: EsbuildServerlessPlugin) {
   // GOOGLE Provider requires a package.json and NO node_modules
   const isGoogleProvider = this.serverless?.service?.provider?.name === 'google';
   const excludedFiles = isGoogleProvider ? [] : excludedFilesDefault;
 
+  // Google provider cannot use individual packaging for now - this could be built in a future release
+  if (isGoogleProvider && this.serverless?.service?.package?.individually)
+    throw new Error(
+      'Packaging failed: cannot package function individually when using Google provider'
+    );
+
   // get a list of all path in build
-  const files: { localPath: string; rootPath: string }[] = glob
+  const files: IFiles = globby
     .sync('**', {
       cwd: this.buildDirPath,
       dot: true,
-      silent: true,
-      follow: true,
+      onlyFiles: true,
     })
-    .filter(p => !excludedFiles.includes(p))
-    .map(localPath => ({ localPath, rootPath: path.join(this.buildDirPath, localPath) }));
+    .filter((p) => !excludedFiles.includes(p))
+    .map((localPath) => ({ localPath, rootPath: path.join(this.buildDirPath, localPath) }));
 
   if (isEmpty(files)) {
-    throw new Error('Packaging: No files found');
+    console.log('Packaging: No files found. Skipping esbuild.');
+    return;
   }
 
   // 1) If individually is not set, just zip the all build dir and return
@@ -51,8 +69,14 @@ export async function pack(this: EsbuildPlugin) {
     const zipName = `${this.serverless.service.service}.zip`;
     const artifactPath = path.join(this.workDirPath, SERVERLESS_FOLDER, zipName);
 
+    // remove prefixes from individual extra files
+    const filesPathList = pipe<IFiles, IFiles, IFiles>(
+      reject(test(/^__only_[^/]+$/)) as (x: IFiles) => IFiles,
+      map(over(lensProp('localPath'), replace(/^__only_[^/]+\//, '')))
+    )(files);
+
     const startZip = Date.now();
-    await zip(artifactPath, files);
+    await zip(artifactPath, filesPathList, this.buildOptions.nativeZip);
     const { size } = fs.statSync(artifactPath);
 
     this.serverless.cli.log(
@@ -70,10 +94,15 @@ export async function pack(this: EsbuildPlugin) {
 
   // get a list of every function bundle
   const buildResults = this.buildResults;
-  const bundlePathList = buildResults.map(b => b.bundlePath);
+  const bundlePathList = buildResults.map((b) => b.bundlePath);
 
-  // get a list of externals
-  const externals = without<string>(this.buildOptions.exclude, this.buildOptions.external);
+  let externals = [];
+
+  // get the list of externals to include only if exclude is not set to *
+  if (this.buildOptions.exclude !== '*' && !this.buildOptions.exclude.includes('*')) {
+    externals = without<string>(this.buildOptions.exclude, this.buildOptions.external);
+  }
+
   const hasExternals = !!externals?.length;
 
   // get a tree of all production dependencies
@@ -81,12 +110,24 @@ export async function pack(this: EsbuildPlugin) {
     ? await packager.getProdDependencies(this.buildDirPath)
     : {};
 
+  const packageFiles = await globby(
+    this.serverless.service.package.patterns
+  );
+
   // package each function
   await Promise.all(
-    buildResults.map(async ({ func, bundlePath }) => {
-      const name = func.name;
+    buildResults.map(async ({ func, functionAlias, bundlePath }) => {
+      const name = `${this.serverless.service.getServiceName()}-${
+        this.serverless.service.provider.stage
+      }-${functionAlias}`;
 
-      const excludedFiles = bundlePathList.filter(p => !bundlePath.startsWith(p));
+      const excludedFiles = bundlePathList
+      .filter((p) => !bundlePath.startsWith(p))
+      .map(trimExtension);
+
+      const functionFiles = await globby(func.package.patterns);
+
+      const includedFiles = [...packageFiles, ...functionFiles];
 
       // allowed external dependencies in the final zip
       let depWhiteList = [];
@@ -101,26 +142,41 @@ export async function pack(this: EsbuildPlugin) {
       const artifactPath = path.join(this.workDirPath, SERVERLESS_FOLDER, zipName);
 
       // filter files
-      const filesPathList = files.filter(({ rootPath, localPath }) => {
-        // exclude non individual files based on file path (and things that look derived, e.g. foo.js => foo.js.map)
-        if (excludedFiles.find(p => localPath.startsWith(p))) return false;
+      const filesPathList = files
+        .filter(({ localPath }) => {
+          // if file is present in patterns it must be included
+          if (includedFiles.find(file => file === localPath)) {
+            return true;
+          }
 
-        // exclude non whitelisted dependencies
-        if (localPath.startsWith('node_modules')) {
-          // if no externals is set or if the provider is google, we do not need any files from node_modules
-          if (!hasExternals || isGoogleProvider) return false;
-          if (
-            // this is needed for dependencies that maps to a path (like scoped ones)
-            !depWhiteList.find(dep => doSharePath(localPath, 'node_modules/' + dep))
-          )
+          // exclude non individual files based on file path (and things that look derived, e.g. foo.js => foo.js.map)
+          if (excludedFiles.find((p) => localPath.startsWith(`${p}.`))) return false;
+
+          // exclude files that belong to individual functions
+          if (localPath.startsWith('__only_') && !localPath.startsWith(`__only_${name}/`))
             return false;
-        }
 
-        return true;
-      });
+          // exclude non whitelisted dependencies
+          if (localPath.startsWith('node_modules')) {
+            // if no externals is set or if the provider is google, we do not need any files from node_modules
+            if (!hasExternals || isGoogleProvider) return false;
+            if (
+              // this is needed for dependencies that maps to a path (like scoped ones)
+              !depWhiteList.find((dep) => doSharePath(localPath, 'node_modules/' + dep))
+            )
+              return false;
+          }
+
+          return true;
+        })
+        // remove prefix from individual function extra files
+        .map(({ localPath, ...rest }) => ({
+          localPath: localPath.replace(`__only_${name}/`, ''),
+          ...rest,
+        }));
 
       const startZip = Date.now();
-      await zip(artifactPath, filesPathList);
+      await zip(artifactPath, filesPathList, this.buildOptions.nativeZip);
 
       const { size } = fs.statSync(artifactPath);
 
@@ -129,11 +185,7 @@ export async function pack(this: EsbuildPlugin) {
       );
 
       // defined present zip as output artifact
-      setFunctionArtifactPath.call(
-        this,
-        func,
-        path.relative(this.serverless.config.servicePath, artifactPath)
-      );
+      setFunctionArtifactPath.call(this, func, path.relative(this.serviceDirPath, artifactPath));
     })
   );
 }
