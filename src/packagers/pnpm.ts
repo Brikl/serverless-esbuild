@@ -5,11 +5,11 @@ import { SpawnError, spawnProcess } from '../utils';
 import { Packager } from './packager';
 
 /**
- * NPM packager.
+ * pnpm packager.
  */
-export class NPM implements Packager {
+export class Pnpm implements Packager {
   get lockfileName() {
-    return 'package-lock.json';
+    return 'pnpm-lock.yaml';
   }
 
   get copyPackageSectionNames() {
@@ -17,24 +17,21 @@ export class NPM implements Packager {
   }
 
   get mustCopyModules() {
-    return true;
+    return false;
   }
 
   async getProdDependencies(cwd: string, depth?: number) {
     // Get first level dependency graph
-    const command = /^win/.test(process.platform) ? 'npm.cmd' : 'npm';
+    const command = /^win/.test(process.platform) ? 'pnpm.cmd' : 'pnpm';
     const args = [
       'ls',
-      '-prod', // Only prod dependencies
-      '-json',
-      depth ? `-depth=${depth}` : null,
+      '--prod', // Only prod dependencies
+      '--json',
+      depth ? `--depth=${depth}` : null,
     ].filter(Boolean);
 
-    const ignoredNpmErrors = [
-      { npmError: 'extraneous', log: false },
-      { npmError: 'missing', log: false },
-      { npmError: 'peer dep missing', log: true },
-    ];
+    // If we need to ignore some errors add them here
+    const ignoredPnpmErrors = [];
 
     try {
       const processOutput = await spawnProcess(command, args, { cwd });
@@ -53,8 +50,8 @@ export class NPM implements Packager {
             return (
               !isEmpty(error) &&
               !any(
-                ignoredError => startsWith(`npm ERR! ${ignoredError.npmError}`, error),
-                ignoredNpmErrors
+                (ignoredError) => startsWith(`npm ERR! ${ignoredError.npmError}`, error),
+                ignoredPnpmErrors
               )
             );
           },
@@ -81,11 +78,8 @@ export class NPM implements Packager {
   }
 
   /**
-   * We should not be modifying 'package-lock.json'
-   * because this file should be treated as internal to npm.
-   *
-   * Rebase package-lock is a temporary workaround and must be
-   * removed as soon as https://github.com/npm/npm/issues/19183 gets fixed.
+   * We should not be modifying 'pnpm-lock.yaml'
+   * because this file should be treated as internal to pnpm.
    */
   rebaseLockfile(pathToPackageRoot: string, lockfile: JSONObject) {
     if (lockfile.version) {
@@ -101,25 +95,28 @@ export class NPM implements Packager {
     return lockfile;
   }
 
-  async install(cwd: string, extraArgs: Array<string>) {
-    const command = /^win/.test(process.platform) ? 'npm.cmd' : 'npm';
-    const args = ['install', ...extraArgs];
+  async install(cwd, extraArgs: Array<string>, useLockfile = true) {
+    const command = /^win/.test(process.platform) ? 'pnpm.cmd' : 'pnpm';
+
+    const args = useLockfile
+      ? ['install', '--frozen-lockfile', ...extraArgs]
+      : ['install', ...extraArgs];
 
     await spawnProcess(command, args, { cwd });
   }
 
   async prune(cwd) {
-    const command = /^win/.test(process.platform) ? 'npm.cmd' : 'npm';
+    const command = /^win/.test(process.platform) ? 'pnpm.cmd' : 'pnpm';
     const args = ['prune'];
 
     await spawnProcess(command, args, { cwd });
   }
 
   async runScripts(cwd, scriptNames) {
-    const command = /^win/.test(process.platform) ? 'npm.cmd' : 'npm';
+    const command = /^win/.test(process.platform) ? 'pnpm.cmd' : 'pnpm';
 
     await Promise.all(
-      scriptNames.map(scriptName => {
+      scriptNames.map((scriptName) => {
         const args = ['run', scriptName];
 
         return spawnProcess(command, args, { cwd });
