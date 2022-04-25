@@ -272,7 +272,7 @@ class EsbuildServerlessPlugin implements ServerlessPlugin {
       delete config['nativeZip'];
       delete config['packager'];
       delete config['packagePath'];
-      delete config['watch'];
+      // delete config['watch']; // use build-in esbuild watch
       delete config['keepOutputDirectory'];
       delete config['packagerOptions'];
       delete config['installExtraArgs'];
