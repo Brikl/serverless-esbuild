@@ -86,7 +86,7 @@ class Pnpm {
     install(cwd) {
         return __awaiter(this, void 0, void 0, function* () {
             const command = /^win/.test(process.platform) ? 'pnpm.cmd' : 'pnpm';
-            const args = ['install', '--frozen-lockfile', '--non-interactive'];
+            const args = ['install', '--frozen-lockfile'];
             yield utils_1.spawnProcess(command, args, { cwd });
         });
     }

@@ -97,7 +97,7 @@ export class Pnpm implements Packager {
 
   async install(cwd) {
     const command = /^win/.test(process.platform) ? 'pnpm.cmd' : 'pnpm';
-    const args = ['install', '--frozen-lockfile', '--non-interactive'];
+    const args = ['install', '--frozen-lockfile'];
 
     await spawnProcess(command, args, { cwd });
   }
