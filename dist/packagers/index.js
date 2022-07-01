@@ -20,10 +20,12 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.get = void 0;
 const npm_1 = require("./npm");
+const pnpm_1 = require("./pnpm");
 const yarn_1 = require("./yarn");
 const registeredPackagers = {
     npm: new npm_1.NPM(),
-    yarn: new yarn_1.Yarn()
+    pnpm: new pnpm_1.Pnpm(),
+    yarn: new yarn_1.Yarn(),
 };
 /**
  * Factory method.
@@ -34,7 +36,7 @@ const registeredPackagers = {
 function get(packagerId) {
     if (!(packagerId in registeredPackagers)) {
         const message = `Could not find packager '${packagerId}'`;
-        this.serverless.cli.log(`ERROR: ${message}`);
+        this.log.error(`ERROR: ${message}`);
         throw new this.serverless.classes.Error(message);
     }
     return registeredPackagers[packagerId];
